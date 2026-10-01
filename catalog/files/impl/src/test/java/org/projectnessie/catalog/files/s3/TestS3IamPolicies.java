@@ -1,0 +1,203 @@
+/*
+ * Copyright (C) 2024 Dremio
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.projectnessie.catalog.files.s3;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Stream;
+import org.assertj.core.api.SoftAssertions;
+import org.assertj.core.api.junit.jupiter.InjectSoftAssertions;
+import org.assertj.core.api.junit.jupiter.SoftAssertionsExtension;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.projectnessie.catalog.files.api.StorageLocations;
+import org.projectnessie.catalog.files.config.ImmutableS3ClientIam;
+import org.projectnessie.catalog.files.config.S3ClientIam;
+import org.projectnessie.storage.uri.StorageUri;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
+
+@ExtendWith(SoftAssertionsExtension.class)
+class TestS3IamPolicies {
+
+  @InjectSoftAssertions protected SoftAssertions soft;
+
+  private static final ObjectMapper MAPPER = JsonMapper.builder().build();
+
+  @Test
+  void multipleStorageLocations() throws Exception {
+    S3ClientIam clientIam =
+        ImmutableS3ClientIam.builder()
+            .enabled(true)
+            .statements(
+                List.of(
+                    "{\"Effect\":\"Deny\", \"Action\":\"s3:*\", \"Resource\":\"arn:aws:s3:::*/blocked\\\"Namespace/*\"}"))
+            .build();
+
+    StorageLocations locations =
+        StorageLocations.storageLocations(
+            StorageUri.of("s3://bucket1/"),
+            List.of(
+                StorageUri.of("s3://bucket1/my/path/bar"),
+                StorageUri.of("s3://bucket2/my/other/bar")),
+            List.of(
+                StorageUri.of("s3://bucket3/read/path/bar"),
+                StorageUri.of("s3://bucket4/read/other/bar")));
+
+    String policy = S3IamPolicies.locationDependentPolicy(clientIam, locations);
+
+    String pretty = MAPPER.readValue(policy, JsonNode.class).toPrettyString();
+
+    soft.assertThat(pretty)
+        .isEqualTo(
+            """
+            {
+              "Version" : "2012-10-17",
+              "Statement" : [ {
+                "Effect" : "Allow",
+                "Action" : "s3:ListBucket",
+                "Resource" : "arn:aws:s3:::bucket1",
+                "Condition" : {
+                  "StringLike" : {
+                    "s3:prefix" : [ "my/path/bar", "my/path/bar/*", "*/my/path/bar", "*/my/path/bar/*", "*/*/*/*/my/path/bar", "*/*/*/*/my/path/bar/*" ]
+                  }
+                }
+              }, {
+                "Effect" : "Allow",
+                "Action" : "s3:ListBucket",
+                "Resource" : "arn:aws:s3:::bucket2",
+                "Condition" : {
+                  "StringLike" : {
+                    "s3:prefix" : [ "my/other/bar", "my/other/bar/*", "*/my/other/bar", "*/my/other/bar/*", "*/*/*/*/my/other/bar", "*/*/*/*/my/other/bar/*" ]
+                  }
+                }
+              }, {
+                "Effect" : "Allow",
+                "Action" : "s3:ListBucket",
+                "Resource" : "arn:aws:s3:::bucket3",
+                "Condition" : {
+                  "StringLike" : {
+                    "s3:prefix" : [ "read/path/bar", "read/path/bar/*", "*/read/path/bar", "*/read/path/bar/*", "*/*/*/*/read/path/bar", "*/*/*/*/read/path/bar/*" ]
+                  }
+                }
+              }, {
+                "Effect" : "Allow",
+                "Action" : "s3:ListBucket",
+                "Resource" : "arn:aws:s3:::bucket4",
+                "Condition" : {
+                  "StringLike" : {
+                    "s3:prefix" : [ "read/other/bar", "read/other/bar/*", "*/read/other/bar", "*/read/other/bar/*", "*/*/*/*/read/other/bar", "*/*/*/*/read/other/bar/*" ]
+                  }
+                }
+              }, {
+                "Effect" : "Allow",
+                "Action" : [ "s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject" ],
+                "Resource" : [ "arn:aws:s3:::bucket1/my/path/bar/*", "arn:aws:s3:::bucket1/*/my/path/bar/*", "arn:aws:s3:::bucket1/*/*/*/*/my/path/bar/*", "arn:aws:s3:::bucket2/my/other/bar/*", "arn:aws:s3:::bucket2/*/my/other/bar/*", "arn:aws:s3:::bucket2/*/*/*/*/my/other/bar/*" ]
+              }, {
+                "Effect" : "Allow",
+                "Action" : [ "s3:GetObject", "s3:GetObjectVersion" ],
+                "Resource" : [ "arn:aws:s3:::bucket3/read/path/bar/*", "arn:aws:s3:::bucket3/*/read/path/bar/*", "arn:aws:s3:::bucket3/*/*/*/*/read/path/bar/*", "arn:aws:s3:::bucket4/read/other/bar/*", "arn:aws:s3:::bucket4/*/read/other/bar/*", "arn:aws:s3:::bucket4/*/*/*/*/read/other/bar/*" ]
+              }, {
+                "Effect" : "Deny",
+                "Action" : "s3:*",
+                "Resource" : "arn:aws:s3:::*/blocked\\"Namespace/*"
+              } ]
+            }""");
+  }
+
+  @ParameterizedTest
+  @MethodSource
+  void locationDependentPolicy(S3ClientIam iam, List<String> expectedResources) {
+    StorageUri location = StorageUri.of("s3://foo/b\"ar");
+    StorageLocations locations =
+        StorageLocations.storageLocations(StorageUri.of("s3://foo/"), List.of(location), List.of());
+    soft.assertThatCode(
+            () -> {
+              String policy = S3IamPolicies.locationDependentPolicy(iam, locations);
+              ObjectNode json = MAPPER.readValue(policy, ObjectNode.class);
+              ArrayNode statements = json.withArray("Statement");
+              List<String> resources = new ArrayList<>();
+              for (JsonNode statement : statements) {
+                JsonNode res = statement.get("Resource");
+                if (res.isArray()) {
+                  for (JsonNode re : res) {
+                    resources.add(re.stringValue());
+                  }
+                }
+                if (res.isString()) {
+                  resources.add(res.stringValue());
+                }
+              }
+              assertThat(resources).containsExactlyElementsOf(expectedResources);
+            })
+        .doesNotThrowAnyException();
+  }
+
+  static Stream<Arguments> locationDependentPolicy() {
+    return Stream.of(
+        arguments(
+            ImmutableS3ClientIam.builder().enabled(true).build(),
+            List.of(
+                "arn:aws:s3:::foo",
+                "arn:aws:s3:::foo/b\"ar/*",
+                "arn:aws:s3:::foo/*/b\"ar/*",
+                "arn:aws:s3:::foo/*/*/*/*/b\"ar/*")),
+        arguments(
+            ImmutableS3ClientIam.builder()
+                .enabled(true)
+                .statements(
+                    List.of(
+                        "{\"Effect\":\"Deny\", \"Action\":\"s3:*\", \"Resource\":\"arn:aws:s3:::*/blocked\\\"Namespace/*\"}\n"))
+                .build(),
+            List.of(
+                "arn:aws:s3:::foo",
+                "arn:aws:s3:::foo/b\"ar/*",
+                "arn:aws:s3:::foo/*/b\"ar/*",
+                "arn:aws:s3:::foo/*/*/*/*/b\"ar/*",
+                "arn:aws:s3:::*/blocked\"Namespace/*")));
+  }
+
+  @ParameterizedTest
+  @MethodSource
+  void invalidSessionPolicyStatement(String invalid) {
+    StorageUri location = StorageUri.of("s3://foo/bar");
+    StorageLocations locations =
+        StorageLocations.storageLocations(StorageUri.of("s3://foo/"), List.of(location), List.of());
+    S3ClientIam iam =
+        ImmutableS3ClientIam.builder().enabled(true).statements(List.of(invalid)).build();
+    soft.assertThatThrownBy(() -> S3IamPolicies.locationDependentPolicy(iam, locations))
+        .isInstanceOf(RuntimeException.class)
+        .cause()
+        .isInstanceOf(IOException.class);
+  }
+
+  static Stream<String> invalidSessionPolicyStatement() {
+    return Stream.of(
+        "\"Effect\":\"Deny\", \"Action\":\"s3:*\", \"Resource\":\"arn:aws:s3:::*/blockedNamespace/*\"}",
+        "\"Effect:\"Deny\", \"Action\":\"s3:*\", \"Resource\":\"arn:aws:s3:::*/blockedNamespace/*\"}",
+        "}\"Effect:\"Deny\", \"Action\":\"s3:*\", \"Resource\":\"arn:aws:s3:::*/blockedNamespace/*\"}");
+  }
+}

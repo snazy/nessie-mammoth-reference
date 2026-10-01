@@ -1,0 +1,48 @@
+name: 'Replay telemetry / end'
+description: 'Snapshots the dependency cache and uploads the job telemetry before post steps run'
+inputs:
+  job:
+    description: 'Workflow job ID'
+    required: true
+  cache-outputs:
+    description: 'JSON outputs of the cache step (empty object for the incumbent)'
+    default: '{}'
+runs:
+  using: "composite"
+  steps:
+    - name: Snapshot dependency cache, write job record
+      shell: bash
+      env:
+        REPLAY_JOB: ${{ inputs.job }}
+        REPLAY_CACHE_OUTPUTS: ${{ inputs.cache-outputs }}
+      run: |
+        dir="${RUNNER_TEMP}/replay-telemetry"
+        bash "${{ github.action_path }}/../replay-telemetry-begin/dep-snapshot.sh" end "${dir}"
+        python3 - "${dir}/job.json" <<'PY'
+        import json, os, sys
+        try:
+            cache_outputs = json.loads(os.environ.get("REPLAY_CACHE_OUTPUTS") or "{}") or {}
+        except ValueError:
+            cache_outputs = {"unparsed": os.environ.get("REPLAY_CACHE_OUTPUTS", "")}
+        rec = {
+            "schema": 1,
+            "job": os.environ["REPLAY_JOB"],
+            "runId": os.environ.get("GITHUB_RUN_ID"),
+            "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+            "event": os.environ.get("GITHUB_EVENT_NAME"),
+            "sha": os.environ.get("GITHUB_SHA"),
+            "runnerOs": os.environ.get("RUNNER_OS"),
+            "runnerArch": os.environ.get("RUNNER_ARCH"),
+            "imageVersion": os.environ.get("ImageVersion"),
+            "cacheOutputs": cache_outputs,
+        }
+        with open(sys.argv[1], "w") as f:
+            json.dump(rec, f)
+        PY
+    - name: Upload telemetry
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: replay-telemetry-${{ inputs.job }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/replay-telemetry/
+        retention-days: 10
+        if-no-files-found: warn

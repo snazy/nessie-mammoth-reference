@@ -1,0 +1,687 @@
+#
+# Copyright (C) 2022 Dremio
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+openapi: 3.0.3 # must be compatible with quarkus
+
+# Note: the final OpenAPI definition file is produced at build time by merging this data with OpenAPI java annotations.
+
+info:
+  title: Nessie API
+  version: ${project.version}
+  contact:
+    name: Project Nessie
+    url: https://projectnessie.org
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+
+tags:
+  - name: v1
+    description: End points from the legacy v1 API, deprecated
+  - name: v2
+    description: End points from the Nessie v2 API
+
+servers:
+  # Not documenting Dremio Arctic API URLs here, because the REST version path element is at a different place.
+  # - url: "https://nessie.dremio.cloud/v2/repositories/{repositoryId}/"
+  #   description: Dremio Arctic Nessie URL
+  #   variables:
+  #     repositoryId:
+  #       description: The repository ID (mandatory) of your Arctic catalog. See "Catalog Endpoint" in "General Information"/"Catalog Settings" on the Dremio Cloud Arctic Catalogs page
+  #       default: ""
+  - url: "{scheme}://{host}:{port}/{basePath}"
+    description: Nessie REST API endpoint.
+    variables:
+      scheme:
+        description: The scheme of the URI, either http or https.
+        default: http
+      host:
+        description: The host address for the specified server
+        default: localhost
+      port:
+        description: The port used when addressing the host
+        default: "19120"
+      basePath:
+        description: |
+          Nessie Core API base path.
+          When using the Swagger UI from Quarkus from the `/q/swagger-ui` URL, leave the `basePath` value empty.
+          Otherwise use `/api/` for `basePath`.
+        default: ""
+
+paths: {} # inferred from java annotations
+
+components:
+  examples:
+    nessieConfigV1:
+      value:
+        defaultBranch: main
+        maxSupportedApiVersion: 2
+
+    nessieConfig:
+      value:
+        defaultBranch: main
+        minSupportedApiVersion: 1
+        maxSupportedApiVersion: 2
+        specVersion: "2.0.0"
+
+    namespace:
+      value: "a.b.c"
+
+    ref:
+      value: "main"
+
+    refWithHash:
+      value: "main@1122334455667788112233445566778811223344556677881122334455667788"
+
+    refWithTimestampMillisSinceEpoch:
+      value: "main*1685185847230"
+
+    refWithTimestampInstant:
+      value: "main*2021-04-07T14:42:25.534748Z"
+
+    refWithNthPredecessor:
+      value: "main~10"
+
+    refWithMergeParent:
+      value: "main@1122334455667788112233445566778811223344556677881122334455667788^2"
+
+    refDefault:
+      value: "-"
+
+    refDetached:
+      value: "@1122334455667788112233445566778811223344556677881122334455667788"
+
+    refForDiffWithHash:
+      value: "main@1122334455667788112233445566778811223344556677881122334455667788"
+
+    referenceType:
+      value: "branch"
+
+    hash:
+      value: "1122334455667788112233445566778811223344556677881122334455667788"
+
+    nullHash:
+      value:
+
+    refObj:
+      value:
+        type: BRANCH
+        hash: "1122334455667788112233445566778811223344556677881122334455667788"
+        name: "main"
+
+    refObjNew:
+      value:
+        type: BRANCH
+        hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+        name: "exampleBranch"
+
+    tagObj:
+      value:
+        type: TAG
+        hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+        name: "exampleTag"
+
+    ContentKeyGet:
+      value: "example.key"
+
+    ContentKey:
+      value:
+        elements:
+          - example
+          - key
+
+    namespaceName:
+      value: "a.b.c"
+
+    emptyNamespaceName:
+      value:
+
+    namespacesResponse:
+      value:
+        namespaces:
+          - type: NAMESPACE
+            elements:
+              - a
+              - b.c
+              - d
+          - type: NAMESPACE
+            elements:
+              - a
+              - b
+              - d
+
+    namespaceUpdate:
+      value:
+        propertyUpdates:
+          key1: value1
+          key2: value2
+        propertyRemovals:
+          - key3
+          - key4
+
+    iceberg:
+      value:
+        type: ICEBERG_TABLE
+        id: b874b5d5-f926-4eed-9be7-b2380d9810c0
+        metadataLocation: "/path/to/metadata/"
+        snapshotId: 1
+        schemaId: 2
+        specId: 3
+        sortOrderId: 4
+
+    expr_by_namespace:
+      value: "entry.namespace.startsWith('a.b.c')"
+    expr_by_contentType:
+      value: "entry.contentType in ['ICEBERG_TABLE','DELTA_LAKE_TABLE']"
+    expr_by_namespace_and_contentType:
+      value: "entry.namespace.startsWith('some.name.space') && entry.contentType in ['ICEBERG_TABLE','DELTA_LAKE_TABLE']"
+    expr_by_commit_author:
+      value: "commit.author=='nessie_author'"
+    expr_by_commit_committer:
+      value: "commit.committer=='nessie_committer'"
+    expr_by_commitTime:
+      value: "timestamp(commit.commitTime) > timestamp('2021-05-31T08:23:15Z')"
+    expr_by_commit_operations_in_namespace:
+      value: "operations.exists(op, op.key.startsWith('some.name.space.'))"
+    expr_by_commit_operations_table_name:
+      value: "operations.exists(op, op.name == 'BaseTable')"
+    expr_by_commit_operations_type:
+      value: "operations.exists(op, op.type == 'PUT')"
+    expr_by_refType:
+      value: "refType == 'BRANCH'"
+    expr_by_ref_name:
+      value: "ref.name == 'my-tag-or-branch'"
+    expr_by_ref_commit:
+      value: "commit.message == 'invent awesome things'"
+
+    commitMessage:
+      value: "Example Commit Message"
+
+    multiGetResponse:
+      value:
+        contents:
+          - content:
+              type: ICEBERG_TABLE
+              id: b874b5d5-f926-4eed-9be7-b2380d9810c0
+              metadataLocation: "/path/to/metadata/"
+              snapshotId: 1
+              schemaId: 2
+              specId: 3
+              sortOrderId: 4
+            key:
+              elements:
+                - example
+                - key
+
+    multiGetRequest:
+      value:
+        requestedKeys:
+          - elements:
+              - example
+              - key
+
+    entriesResponse:
+      value:
+        token: null
+        hasMore: false
+        entries:
+          - name:
+              elements:
+                - example
+                - key
+            type: ICEBERG_TABLE
+
+    entriesResponseV2:
+      value:
+        token: "xxx"
+        hasMore: false
+        effectiveReference:
+          type: BRANCH
+          hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+          name: "exampleBranch"
+        entries:
+          - name:
+              elements:
+                - example
+                - key
+            type: ICEBERG_TABLE
+            contentId: "f350b391-f492-41eb-9959-730a8c49f01e"
+            content:
+              type: ICEBERG_TABLE
+              id: "f350b391-f492-41eb-9959-730a8c49f01e"
+              metadataLocation: "/path/to/metadata/"
+              snapshotId: 23
+              schemaId: 15
+              specId: 15
+              sortOrderId: 15
+
+    types:
+      value:
+        - ICEBERG_TABLE
+
+    merge:
+      value:
+        fromHash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+        fromRefName: "source-ref-name"
+        defaultKeyMergeMode: "NORMAL"
+        keyMergeModes:
+          - key:
+              elements:
+                - example
+                - key
+            mergeBehavior: "FORCE"
+        dryRun: false
+        fetchAdditionalInfo: false
+        returnConflictAsResult: true
+
+    transplant:
+      value:
+        hashesToTransplant:
+          - "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+        fromRefName: "source-ref-name"
+        defaultKeyMergeMode: "NORMAL"
+        keyMergeModes:
+          - key:
+              elements:
+                - example
+                - key
+            mergeBehavior: "FORCE"
+        dryRun: false
+        fetchAdditionalInfo: false
+        returnConflictAsResult: true
+
+    mergeResponseSuccess:
+      value:
+        wasApplied: true
+        wasSuccessful: true
+        resultantTargetHash: "8a2f19888eb620c25b0d2cbcddfdf56fb2d3e9dd443c6d29e37c567493fc5d3b"
+        commonAncestor: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+        targetBranch: "main"
+        effectiveTargetHash: "e9058b675c519b3542cd8155aed42ecf1ddb4e55874e3eb241b30b96f861566a"
+        expectedHash: "1122334455667788112233445566778811223344556677881122334455667788"
+        details:
+          - key:
+              elements:
+                - example
+                - key
+            mergeBehavior: "NORMAL"
+
+    mergeResponseFail:
+      value:
+        wasApplied: false
+        wasSuccessful: false
+        resultantTargetHash: "8a2f19888eb620c25b0d2cbcddfdf56fb2d3e9dd443c6d29e37c567493fc5d3b"
+        commonAncestor: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+        targetBranch: "main"
+        effectiveTargetHash: "8a2f19888eb620c25b0d2cbcddfdf56fb2d3e9dd443c6d29e37c567493fc5d3b"
+        expectedHash: "1122334455667788112233445566778811223344556677881122334455667788"
+        details:
+          - key:
+              elements:
+                - example
+                - key
+            mergeBehavior: "NORMAL"
+            conflict:
+              type: "KEY_EXISTS"
+              message: "key 'example.key' already exists"
+              key:
+                elements:
+                  - example
+                  - key
+
+    operations:
+      value:
+        commitMeta:
+          author: "authorName <authorName@example.com>"
+          authorTime: "2021-04-07T14:42:25.534748Z"
+          message: "Example Commit Message"
+          properties:
+            additionalProp1: "xxx"
+            additionalProp2: "yyy"
+            additionalProp3: "zzz"
+          signedOffBy: "signedOffByName <signedOffBy@example.com>"
+        operations:
+          - type: PUT
+            key:
+              elements:
+                - table1
+            content:
+              type: ICEBERG_TABLE
+              metadataLocation: "/path/to/metadata/"
+              snapshotId: 1
+              schemaId: 2
+              specId: 3
+              sortOrderId: 4
+
+    logResponseAdditionalInfo:
+      value:
+        token: "xxx"
+        hasMore: false
+        logEntries:
+          - commitMeta:
+              author: "authorName <authorName@example.com>"
+              authorTime: "2021-04-07T14:42:25.534748Z"
+              commitTime: "2021-04-07T14:42:25.534748Z"
+              committer: "committerName <committerName@example.com>"
+              hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+              message: "Example Commit Message"
+              properties:
+                additionalProp1: "xxx"
+                additionalProp2: "yyy"
+                additionalProp3: "zzz"
+              signedOffBy: "signedOffByName <signedOffBy@example.com>"
+            parentCommitHash: "1122334455667788112233445566778811223344556677881122334455667788"
+            operations:
+              - type: DELETE
+                key:
+                  elements:
+                    - deleted
+                    - table
+              - type: PUT
+                key:
+                  elements:
+                    - example
+                    - key
+                content:
+                  type: ICEBERG_TABLE
+                  id: b874b5d5-f926-4eed-9be7-b2380d9810c0
+                  metadataLocation: "/path/to/metadata/"
+                  snapshotId: 1
+                  schemaId: 2
+                  specId: 3
+                  sortOrderId: 4
+    logResponseSimple:
+      value:
+        token: "xxx"
+        hasMore: false
+        logEntries:
+          - commitMeta:
+              author: "authorName <authorName@example.com>"
+              authorTime: "2021-04-07T14:42:25.534748Z"
+              commitTime: "2021-04-07T14:42:25.534748Z"
+              committer: "committerName <committerName@example.com>"
+              hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+              message: "Example Commit Message"
+              properties:
+                additionalProp1: "xxx"
+                additionalProp2: "yyy"
+                additionalProp3: "zzz"
+              signedOffBy: "signedOffByName <signedOffBy@example.com>"
+
+    multipleContentsResponse:
+      value:
+        contents:
+          - content:
+              type: ICEBERG_TABLE
+              id: "b874b5d5-f926-4eed-9be7-b2380d9810c0"
+              metadataLocation: "/path/to/metadata/"
+              snapshotId: 1
+              schemaId: 2
+              specId: 3
+              sortOrderId: 4
+            key:
+              elements:
+                - example
+                - key
+        effectiveReference:
+          type: BRANCH
+          hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+          name: "exampleBranch"
+
+    commitResponse:
+      value:
+        targetBranch:
+          type: BRANCH
+          hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+          name: "exampleBranch"
+        addedContents:
+          - contentId: "7fe924d9-45af-574e-9bbc-51b48077017e"
+            key:
+              elements:
+                - example
+                - key
+
+    contentResponseIceberg:
+      value:
+        content:
+          type: ICEBERG_TABLE
+          id: b874b5d5-f926-4eed-9be7-b2380d9810c0
+          metadataLocation: "/path/to/metadata/"
+          snapshotId: 1
+          schemaId: 2
+          specId: 3
+          sortOrderId: 4
+        effectiveReference:
+          type: BRANCH
+          hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+          name: "exampleBranch"
+
+    singleReferenceResponse:
+      value:
+        reference:
+          type: BRANCH
+          hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+          name: "exampleBranch"
+
+    singleReferenceResponseWithMetadata:
+      value:
+        reference:
+          type: BRANCH
+          hash: "84c57a20c5e956af4af40f3cc34ecc8a9028b9586da135c79011b1867aa3191d"
+          name: "main"
+          metadata:
+            commitMetaOfHEAD:
+              hash: "84c57a20c5e956af4af40f3cc34ecc8a9028b9586da135c79011b1867aa3191d"
+              committer: ""
+              author: "nessie-author"
+              signedOffBy: null
+              message: "update table"
+              commitTime: "2021-11-26T08:01:13.855974Z"
+              authorTime: "2021-11-26T08:01:13.852826Z"
+              properties: {}
+
+    referencesResponse:
+      value:
+        token: null
+        hasMore: false
+        references:
+          - type: BRANCH
+            hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+            name: "exampleBranch"
+          - type: TAG
+            hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+            name: "exampleTag"
+          - type: BRANCH
+            hash: "1122334455667788112233445566778811223344556677881122334455667788"
+            name: "main"
+
+    referenceHistoryResponse:
+      value:
+        reference:
+          type: BRANCH
+          hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+          name: "exampleBranch"
+        current:
+          pointer: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+          commitConsistency: "COMMIT_CONSISTENT"
+          meta:
+            hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+            committer: ""
+            author: "nessie-author"
+            signedOffBy: null
+            message: "update table"
+            commitTime: "2021-11-26T08:01:13.855974Z"
+            authorTime: "2021-11-26T08:01:13.852826Z"
+            properties: {}
+        previous:
+          - pointer: "84c57a20c5e956af4af40f3cc34ecc8a9028b9586da135c79011b1867aa3191d"
+            commitConsistency: "COMMIT_CONSISTENT"
+            meta:
+              hash: "84c57a20c5e956af4af40f3cc34ecc8a9028b9586da135c79011b1867aa3191d"
+              committer: ""
+              author: "nessie-author"
+              signedOffBy: null
+              message: "add table"
+              commitTime: "2021-11-26T07:01:13.855974Z"
+              authorTime: "2021-11-26T07:01:13.852826Z"
+              properties: { }
+          - pointer: "1122334455667788112233445566778811223344556677881122334455667788"
+            commitConsistency: "COMMIT_CONSISTENT"
+            meta:
+              hash: "1122334455667788112233445566778811223344556677881122334455667788"
+              committer: ""
+              author: "nessie-author"
+              signedOffBy: null
+              message: "add table"
+              commitTime: "2021-11-26T06:01:13.855974Z"
+              authorTime: "2021-11-26T06:01:13.852826Z"
+              properties: { }
+        commitLogConsistency: "NOT_CHECKED"
+
+    referencesResponseWithMetadata:
+      value:
+        token: null
+        hasMore: false
+        references:
+          - type: BRANCH
+            hash: "84c57a20c5e956af4af40f3cc34ecc8a9028b9586da135c79011b1867aa3191d"
+            name: "main"
+            metadata:
+              commitMetaOfHEAD:
+                hash: "84c57a20c5e956af4af40f3cc34ecc8a9028b9586da135c79011b1867aa3191d"
+                committer: ""
+                author: "nessie-author"
+                signedOffBy: null
+                message: "update table"
+                commitTime: "2021-11-26T08:01:13.855974Z"
+                authorTime: "2021-11-26T08:01:13.852826Z"
+                properties: {}
+          - type: BRANCH
+            hash: "da086850076827d2989c8ee1d7fd22f152f525d46a0441f2b22ad8119c0bbbe5"
+            name: "dev"
+            metadata:
+              numCommitsAhead: 1
+              numCommitsBehind: 2
+              commonAncestorHash: "1122334455667788112233445566778811223344556677881122334455667788"
+              numTotalCommits: 42
+              commitMetaOfHEAD:
+                hash: "da086850076827d2989c8ee1d7fd22f152f525d46a0441f2b22ad8119c0bbbe5"
+                committer: ""
+                author: "nessie-author"
+                signedOffBy: null
+                message: "update table X"
+                commitTime: "2021-11-26T08:01:13.834397Z"
+                authorTime: "2021-11-26T08:01:13.831371Z"
+                properties: {}
+          - type: BRANCH
+            hash: "1122334455667788112233445566778811223344556677881122334455667788"
+            name: "dev2"
+            metadata:
+              numCommitsAhead: 0
+              numCommitsBehind: 2
+              commonAncestorHash: "1122334455667788112233445566778811223344556677881122334455667788"
+          - type: TAG
+            hash: "a682bfdcd5d357b5c964ef07e2eef61fabba42cb8effa8d62357df45a6cc0371"
+            name: "testTag1"
+            metadata:
+              numCommitsAhead: null
+              numCommitsBehind: null
+              commonAncestorHash: null
+              numTotalCommits: 42
+              commitMetaOfHEAD:
+                hash: "a682bfdcd5d357b5c964ef07e2eef61fabba42cb8effa8d62357df45a6cc0371"
+                committer: ""
+                author: "nessie-author"
+                signedOffBy: null
+                message: "update table Y"
+                commitTime: "2021-11-23T08:01:14.834397Z"
+                authorTime: "2021-11-23T08:01:14.831371Z"
+                properties: {}
+          - type: TAG
+            hash: "da086850076827d2989c8ee1d7fd22f152f525d46a0441f2b22ad8119c0bbbe5"
+            name: "testTag2"
+            metadata:
+              numCommitsAhead: null
+              numCommitsBehind: null
+              commonAncestorHash: null
+              numTotalCommits: 42
+              commitMetaOfHEAD:
+                hash: "da086850076827d2989c8ee1d7fd22f152f525d46a0441f2b22ad8119c0bbbe5"
+                committer: ""
+                author: "nessie-author"
+                signedOffBy: null
+                message: "update table X"
+                commitTime: "2021-11-26T08:01:13.834397Z"
+                authorTime: "2021-11-26T08:01:13.831371Z"
+                properties: {}
+
+    diffResponse:
+      value:
+        diffs:
+          - key:
+              elements:
+                - example
+                - key
+            from:
+              type: ICEBERG_TABLE
+              id: "f350b391-f492-41eb-9959-730a8c49f01e"
+              metadataLocation: "/path/to/metadata/"
+              snapshotId: 23
+              schemaId: 15
+              specId: 15
+              sortOrderId: 15
+            to:
+              type: ICEBERG_TABLE
+              id: "dec31d0a-7d4b-4534-8c24-24f08eda33b2"
+              metadataLocation: "/path/to/metadata/"
+              snapshotId: 24
+              schemaId: 16
+              specId: 16
+              sortOrderId: 16
+
+    diffResponseWithRef:
+      value:
+        hasMore: false
+        token: null
+        diffs:
+          - key:
+              elements:
+                - example
+                - key
+            from:
+              type: ICEBERG_TABLE
+              id: "f350b391-f492-41eb-9959-730a8c49f01e"
+              metadataLocation: "/path/to/metadata/"
+              snapshotId: 23
+              schemaId: 15
+              specId: 15
+              sortOrderId: 15
+            to:
+              type: ICEBERG_TABLE
+              id: "dec31d0a-7d4b-4534-8c24-24f08eda33b2"
+              metadataLocation: "/path/to/metadata/"
+              snapshotId: 24
+              schemaId: 16
+              specId: 16
+              sortOrderId: 16
+        effectiveFromReference:
+          type: BRANCH
+          hash: "da086850076827d2989c8ee1d7fd22f152f525d46a0441f2b22ad8119c0bbbe5"
+          name: "dev"
+        effectiveToReference:
+          type: BRANCH
+          hash: "abcdef4242424242424242424242beef00dead42112233445566778899001122"
+          name: "exampleBranch"

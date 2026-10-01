@@ -1,0 +1,13 @@
+name: 'Replay telemetry / begin'
+description: 'Installs the passive task-outcome init script and snapshots the dependency cache after cache prepare'
+runs:
+  using: "composite"
+  steps:
+    - name: Install init script, snapshot dependency cache
+      shell: bash
+      run: |
+        dir="${RUNNER_TEMP}/replay-telemetry"
+        mkdir -p "${dir}" ~/.gradle/init.d
+        cp "${{ github.action_path }}/replay-telemetry.init.gradle" ~/.gradle/init.d/zz-replay-telemetry.init.gradle
+        echo "REPLAY_TELEMETRY_DIR=${dir}" >> "${GITHUB_ENV}"
+        bash "${{ github.action_path }}/dep-snapshot.sh" begin "${dir}"

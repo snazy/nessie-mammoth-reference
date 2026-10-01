@@ -1,0 +1,1067 @@
+# Copyright (C) 2020 Dremio
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Unifies main + PR workflow.
+#
+# The unified CI workflow consists of 2 "stages":
+# - Checks - test, intTest, NesQuEIT, etc
+# - Finalize - a "success" dummy job for PRs + a "save to github-cache" job for push-to-main
+#
+# Utilizes the Gradle build cache for all stages. The updated build cache
+# of the jobs in the checks stage are saved as artifacts (with the minimum
+# retention period). The updated build cache is pushed back to GigHub's
+# cache when the checks have successfully finished.
+
+name: CI build
+
+on:
+  push:
+    branches:
+      - main
+      - release-*
+    paths-ignore:
+      - 'LICENSE'
+      - 'NOTICE'
+      - '**.md'
+      - '!site/**'
+      - '.github/renovate.json5'
+      - '.github/workflows/release*.yml'
+      - '.github/workflows/check*.yml'
+      - '.idea/**'
+      - '.editorconfig'
+  pull_request:
+    types: [labeled, opened, synchronize, reopened]
+
+# For the main branch: let all CI runs complete, one after the other. This has a couple advantages:
+# * Site deployments happen in commit-order
+# * Saved Gradle cache are persisted in commit-order
+# * (Potentially) more GH runners available for PRs
+concurrency:
+  # PRs: 1 CI run concurrently / older ones are cancelled
+  # main branch: 1 CI run concurrently / no cancellation
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  code-checks:
+    name: CI Code Checks et al
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Gradle / Compile
+        run: |
+          ./gradlew \
+            spotlessCheck \
+            compileAll \
+            -x :nessie-quarkus:compileAll \
+            -x :nessie-server-admin-tool:compileAll \
+            -x :nessie-events-quarkus:compileAll \
+            -x :nessie-events-ri:compileAll \
+            --continue \
+            --scan
+
+      - name: Gradle / Compile Quarkus
+        run: |
+          ./gradlew :nessie-quarkus:compileAll \
+            :nessie-server-admin-tool:compileAll \
+            :nessie-events-quarkus:compileAll \
+            :nessie-events-ri:compileAll \
+            --continue \
+            --scan
+
+      - name: Gradle / Code checks
+        run: ./gradlew codeChecks --continue --scan
+
+      - name: Gradle / Assemble
+        run: ./gradlew assemble --continue --scan
+
+      - name: Gradle / Publish to Maven local
+        run: ./gradlew publishToMavenLocal --continue --scan
+
+      # This is a rather quick one and uses the output of 'publishToMavenLocal', which uses the
+      # outputs of 'assemble'
+      - name: Gradle / build tools integration tests
+        run: ./gradlew buildToolsIntegrationTest --continue
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: code-checks
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+      - name: Save partial Gradle build cache
+        uses: ./.github/actions/ci-incr-build-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          job-name: 'code-checks'
+
+  test:
+    name: CI Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Gradle / test
+        run: |
+          ./gradlew \
+            test \
+            :nessie-client:check \
+            -x :nessie-client:intTest \
+            -x :nessie-quarkus:test \
+            -x :nessie-server-admin-tool:test \
+            -x :nessie-events-quarkus:test \
+            -x :nessie-events-ri:test \
+            --continue \
+            --scan
+
+      - name: Capture Test Reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ failure() }}
+        with:
+          name: ci-test-reports
+          path: |
+            **/build/reports/*
+            **/build/test-results/*
+          retention-days: 7
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: test
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+      - name: Save partial Gradle build cache
+        uses: ./.github/actions/ci-incr-build-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          job-name: 'test'
+
+  test-quarkus:
+    name: CI Test Quarkus
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Gradle / Test Quarkus Server
+        run: |
+          ./gradlew :nessie-quarkus:test --scan
+
+      - name: Gradle / Test Quarkus Events
+        run: |
+          ./gradlew :nessie-events-quarkus:test --scan
+
+      - name: Gradle / Test Quarkus Events RI
+        run: |
+          ./gradlew :nessie-events-ri:test --scan
+
+      - name: Dump quarkus.log
+        if: ${{ failure() }}
+        run: |
+          find . -path "**/build/quarkus.log" | while read ql ; do
+            echo "::group::Quarkus build log $ql"
+            cat $ql
+            echo "::endgroup::"
+          done
+
+      - name: Capture Test Reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ failure() }}
+        with:
+          name: ci-test-quarkus-reports
+          path: |
+            **/build/quarkus.log
+            **/build/reports/*
+            **/build/test-results/*
+          retention-days: 7
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: test-quarkus
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+      - name: Save partial Gradle build cache
+        uses: ./.github/actions/ci-incr-build-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          job-name: 'test-quarkus'
+
+  int-test:
+    name: CI intTest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SPARK_LOCAL_IP: localhost
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Gradle / intTest
+        run: |
+          echo "::group::Collect :nessie-versioned-storage projects"
+          ./gradlew :listProjectsWithPrefix --prefix :nessie-versioned-persist- --output ../persist-prjs.txt --exclude
+          echo "::endgroup::"
+
+          echo "::group::Collect :nessie-versioned-persist projects"
+          ./gradlew :listProjectsWithPrefix --prefix :nessie-versioned-storage- --output ../storage-prjs.txt --exclude
+          echo "::endgroup::"
+
+          echo "::group::Collect :nessie-spark-extensions projects"
+          ./gradlew :listProjectsWithPrefix --prefix :nessie-spark-ext --output ../spark-prjs.txt --exclude
+          echo "::endgroup::"
+
+          ./gradlew intTest \
+            -x :nessie-quarkus:intTest \
+            -x :nessie-server-admin-tool:intTest \
+            -x :nessie-events-quarkus:intTest \
+            $(cat ../persist-prjs.txt) \
+            $(cat ../storage-prjs.txt) \
+            $(cat ../spark-prjs.txt) \
+            --continue \
+            --scan
+
+      - name: Capture Test Reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ failure() }}
+        with:
+          name: ci-inttest-reports
+          path: |
+            **/build/reports/*
+            **/build/test-results/*
+          retention-days: 7
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: int-test
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+      - name: Save partial Gradle build cache
+        uses: ./.github/actions/ci-incr-build-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          job-name: 'int-test'
+
+  int-test-stores:
+    name: CI intTest versioned/stores
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Gradle / intTest versioned/stores
+        run: |
+          echo "::group::Collect :nessie-versioned-storage projects"
+          ./gradlew :listProjectsWithPrefix --prefix :nessie-versioned-storage- --output ../storage-prjs.txt
+          echo "::endgroup::"
+
+          echo "::group::Collect :nessie-versioned-persist projects"
+          ./gradlew :listProjectsWithPrefix --prefix :nessie-versioned-persist- --output ../persist-prjs.txt
+          echo "::endgroup::"
+
+          ./gradlew $(cat ../persist-prjs.txt) $(cat ../storage-prjs.txt) --continue --scan
+
+      - name: Capture Test Reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ failure() }}
+        with:
+          name: ci-inttest-stores-reports
+          path: |
+            **/build/reports/*
+            **/build/test-results/*
+          retention-days: 7
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: int-test-stores
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+      - name: Save partial Gradle build cache
+        uses: ./.github/actions/ci-incr-build-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          job-name: 'int-test-stores'
+
+  int-test-integrations:
+    name: CI intTest integrations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SPARK_LOCAL_IP: localhost
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+        with:
+          # Need Java 17 in addition to the default Java 21
+          additional-java-version: 17
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Gradle / intTest integrations
+        run: |
+          echo "::group::Collect :nessie-spark-extensions projects"
+          ./gradlew :listProjectsWithPrefix --prefix :nessie-spark-ext --output ../spark-prjs.txt
+          echo "::endgroup::"
+
+          ./gradlew $(cat ../spark-prjs.txt) --continue --scan
+
+      - name: Capture Test Reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ failure() }}
+        with:
+          name: ci-inttest-integrations-reports
+          path: |
+            **/build/reports/*
+            **/build/test-results/*
+          retention-days: 7
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: int-test-integrations
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+      - name: Save partial Gradle build cache
+        uses: ./.github/actions/ci-incr-build-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          job-name: 'int-test-integrations'
+
+  int-test-quarkus-server:
+    name: CI intTest Quarkus Server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Gradle / intTest Quarkus Server
+        run:
+          ./gradlew :nessie-quarkus:intTest --scan
+
+      - name: Dump quarkus.log
+        if: ${{ failure() }}
+        run: |
+          find . -path "**/build/quarkus.log" | while read ql ; do
+            echo "::group::Quarkus build log $ql"
+            cat $ql
+            echo "::endgroup::"
+          done
+
+      - name: Capture Test Reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ failure() }}
+        with:
+          name: ci-inttest-quarkus-server-reports
+          path: |
+            **/build/quarkus.log
+            **/build/reports/*
+            **/build/test-results/*
+          retention-days: 7
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: int-test-quarkus-server
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+      - name: Save partial Gradle build cache
+        uses: ./.github/actions/ci-incr-build-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          job-name: 'int-test-quarkus-server'
+
+  int-test-quarkus-tool:
+    name: CI intTest Admin Tool
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Gradle / intTest Admin Tool
+        run:
+          ./gradlew :nessie-server-admin-tool:intTest --scan
+
+      - name: Dump quarkus.log
+        if: ${{ failure() }}
+        run: |
+          find . -path "**/build/quarkus.log" | while read ql ; do
+            echo "::group::Quarkus build log $ql"
+            cat $ql
+            echo "::endgroup::"
+          done
+
+      - name: Capture Test Reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ failure() }}
+        with:
+          name: ci-inttest-quarkus-tool-reports
+          path: |
+            **/build/quarkus.log
+            **/build/reports/*
+            **/build/test-results/*
+          retention-days: 7
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: int-test-quarkus-tool
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+      - name: Save partial Gradle build cache
+        uses: ./.github/actions/ci-incr-build-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          job-name: 'int-test-quarkus-tool'
+
+  int-test-quarkus-events:
+    name: CI intTest Quarkus Events
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Gradle / intTest Quarkus Events
+        run:
+          ./gradlew :nessie-events-quarkus:intTest --scan
+
+      - name: Dump quarkus.log
+        if: ${{ failure() }}
+        run: |
+          find . -path "**/build/quarkus.log" | while read ql ; do
+            echo "::group::Quarkus build log $ql"
+            cat $ql
+            echo "::endgroup::"
+          done
+
+      - name: Capture Test Reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ failure() }}
+        with:
+          name: ci-inttest-quarkus-events-reports
+          path: |
+            **/build/quarkus.log
+            **/build/reports/*
+            **/build/test-results/*
+          retention-days: 7
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: int-test-quarkus-events
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+      - name: Save partial Gradle build cache
+        uses: ./.github/actions/ci-incr-build-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          job-name: 'int-test-quarkus-events'
+
+  determine-jobs:
+    name: CI Determine jobs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      # Each "conditional" job has a mapped output here, also a "non-PR" case and a "PR" case
+      # with label and globs (at the end of the script).
+      docker: ${{ steps.determine.outputs.docker }}
+      nesqueit: ${{ steps.determine.outputs.nesqueit }}
+    steps:
+      - name: install minimatch
+        shell: bash
+        run: npm install minimatch@"^7.4.3"
+      - name: Determine conditional jobs to run
+        id: determine
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const {Minimatch} = require("minimatch");
+
+            async function getChangedFiles(pull_request) {
+              const listFilesOptions = github.rest.pulls.listFiles.endpoint.merge({
+                owner: pull_request.base.repo.owner.login,
+                repo: pull_request.base.repo.name,
+                pull_number: pull_request.number,
+              });
+              return github.paginate(listFilesOptions).then(resp => resp.map(f => f.filename))
+            }
+
+            function isMatch(changedFile, matchers) {
+              for (const matcher of matchers) {
+                if (matcher.match(changedFile)) {
+                  core.info("Match found for changed file " + changedFile);
+                  return true;
+                }
+              }
+              core.info("No changed file matched the globs");
+              return false;
+            }
+
+            function filesMatchAnyGlob(changedFiles, globs) {
+              const matchers = globs.map(g => new Minimatch(g));
+              for (const changedFile of changedFiles) {
+                if (isMatch(changedFile, matchers)) {
+                  return true;
+                }
+              }
+              return false;
+            }
+
+            function checkLabelOrGlobs(pr, changedFiles, labelName, globs) {
+              core.info("Checking for " + labelName);
+
+              // If the PR has the given label, then let the conditional job run.
+              for (const label of pr.labels) {
+                if (label.name === labelName) {
+                  core.info("PR has label " + labelName);
+                  return true;
+                }
+              }
+
+              // For pull request, check the list of changed files against the given globs.
+              // Let the conditional job run, if any of the globs matches and of the changed files.
+              core.info("Checking changed files against globs " + globs);
+              return filesMatchAnyGlob(changedFiles, globs);
+            }
+
+            ///////////////////////////////////////////////////////////////////////////////////////
+            // "Non PR" case:
+            // Behavior of the conditional jobs when the event that triggered the workflow is not
+            // for a pull request (usually a push-to-main).
+            //
+            if (!context.payload || !context.payload.pull_request) {
+              core.info("Not a pull-request, enabling all jobs.");
+
+              // Yield default values for all event payload types, except pull_request
+              core.setOutput('docker', true);
+              core.setOutput('nesqueit', false); // handled in a scheduled job
+              return true;
+            }
+
+            ///////////////////////////////////////////////////////////////////////////////////////
+            // "PR" case:
+            // Determine the whether the conditional jobs shall run, based on a label name, which
+            // has been manually added, or, if the label is not present, based on some globs to
+            // check.
+
+            const pr = context.payload.pull_request
+            core.info("pull-request #" + pr.number);
+
+            // Retrieves the full list of changed files for the PR.
+            const changedFiles = await getChangedFiles(pr);
+
+            core.startGroup('PR job check / Docker');
+            core.setOutput('docker', checkLabelOrGlobs(pr, changedFiles,
+              'pr-docker',
+              ['gradle/wrapper/**', 'tools/dockerbuild/**', 'helm/**', '.github/**']));
+            core.endGroup();
+
+            core.startGroup('PR job check / NesQuEIT');
+            core.setOutput('nesqueit', checkLabelOrGlobs(pr, changedFiles,
+              'pr-integrations',
+              ['gradle/wrapper/**', 'integrations/**', 'api/**', '.github/**']));
+            core.endGroup();
+
+  docker-testing:
+    name: CI Docker and Helm checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs:
+      - determine-jobs
+    if: needs.determine-jobs.outputs.docker == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Extract version
+        run: |
+          VERSION="$(cat version.txt)"
+          DOCKER_VERSION="${VERSION%-SNAPSHOT}"
+          echo ${DOCKER_VERSION}
+          echo "DOCKER_VERSION=${DOCKER_VERSION}" >> ${GITHUB_ENV}
+
+      # Free disk space (minikube warning: "Docker is nearly out of disk space, which may cause
+      # deployments to fail! (85% of capacity)")
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          # https://helm.sh/docs/topics/version_skew/
+          version: 'v4.3.0'
+
+      - name: Setup chart-testing
+        uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.14'
+
+      - name: Setup & Start Minikube
+        uses: medyagh/setup-minikube@e9e035a86bbc3caea26a450bd4dbf9d0c453682e # v0.0.21
+        with:
+          # If required, use the matrix strategy against this option to test against multiple Kubernetes versions:
+          kubernetes-version: stable
+          cache: false
+          # This _should_ work, but doesn't somehow (the image push fails). It errors out looking for a coredns pod
+          # with these settings...
+          #addons: 'registry'
+          #insecure-registry: '192.168.0.0/16'
+
+      - name: Setup Docker registry
+        run: |
+          echo "::group::Get registry IP"
+          DOCKER_REGISTRY="$(minikube ip)"
+          echo "Registry IP is ${DOCKER_REGISTRY}"
+          echo "::endgroup::"
+
+          echo "::group::Update buildkitd_conf for 'docker buildx build'"
+          # Use 'http' instead of 'https' during 'docker buildx build' in 'tools/dockerbuild/build-push-images.sh'
+          cat <<EOF > ../buildkitd.toml                                                                                                                                                                                                                                                                                            
+          [registry."${DOCKER_REGISTRY}:5000"]                                                                                                                                                                                                                                                                                 
+            http = true
+          EOF
+          buildkitd_conf="$(pwd)/../buildkitd.toml"
+          echo "::endgroup::"
+
+          echo "::group::Update /etc/docker/daemon.json for 'docker pull'"
+          echo "{\"insecure-registries\": [\"${DOCKER_REGISTRY}:5000\"]}" | \
+            sudo tee /etc/docker/daemon.json
+          echo "::endgroup::"
+
+          # minikube restart, because:
+          #   1. required after docker daemon restart 
+          #   2. tweak the "registry addon" into the start command
+          #   3. tweak the "insecure-registry" setting into the start command
+          # Must delete the minikube cluster to let the insecure-registry setting take effect.
+          # See 'Enabling Insecure Registries' in https://minikube.sigs.k8s.io/docs/handbook/registry/
+          echo "::group::Stop minikube"
+          minikube stop
+          echo "::endgroup::"
+          echo "::group::Delete minikube" 
+          minikube delete
+          echo "::endgroup::"
+          echo "::group::Restart docker daemon"
+          sudo systemctl restart docker
+          echo "::endgroup::"
+          echo "::group::Start minikube"
+          minikube start --insecure-registry="${DOCKER_REGISTRY}:5000" --addons=registry
+          echo "::endgroup::"
+
+          echo "BUILDX_CONFIG=--config ${buildkitd_conf}" >> ${GITHUB_ENV}
+          echo "DOCKER_IMAGE=${DOCKER_REGISTRY}:5000/nessie-testing" >> ${GITHUB_ENV}
+          echo "DOCKER_GC_IMAGE=${DOCKER_REGISTRY}:5000/nessie-gc-testing" >> ${GITHUB_ENV}
+          echo "DOCKER_SERVER_ADMIN_IMAGE=${DOCKER_REGISTRY}:5000/nessie-server-admin-testing" >> ${GITHUB_ENV}
+          echo "DOCKER_CLI_IMAGE=${DOCKER_REGISTRY}:5000/nessie-cli-testing" >> ${GITHUB_ENV}
+
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Docker images publishing
+        run: |
+          tools/dockerbuild/build-push-images.sh \
+            -g ":nessie-quarkus" \
+            -p "servers/quarkus-server" \
+            -d "Dockerfile-server" \
+            ${DOCKER_IMAGE}
+
+          tools/dockerbuild/build-push-images.sh \
+            -g ":nessie-gc-tool" \
+            -p "gc/gc-tool" \
+            -d "Dockerfile-gctool" \
+            ${DOCKER_GC_IMAGE}
+
+          tools/dockerbuild/build-push-images.sh \
+            -g ":nessie-server-admin-tool" \
+            -p "tools/server-admin" \
+            -d "Dockerfile-admintool" \
+            ${DOCKER_SERVER_ADMIN_IMAGE}
+
+          tools/dockerbuild/build-push-images.sh \
+            -g ":nessie-cli" \
+            -p "cli/cli" \
+            -d "Dockerfile-cli" \
+            ${DOCKER_CLI_IMAGE}
+
+      - name: Cleanup buildx
+        run: |
+          docker buildx use default
+          docker buildx rm nessiebuild
+
+      - name: Check if expected Docker images exist
+        run: |
+          docker pull ${DOCKER_IMAGE}:latest
+          docker pull ${DOCKER_IMAGE}:latest-java
+          docker pull ${DOCKER_IMAGE}:${DOCKER_VERSION}
+          docker pull ${DOCKER_IMAGE}:${DOCKER_VERSION}-java
+          docker pull ${DOCKER_GC_IMAGE}:latest
+          docker pull ${DOCKER_GC_IMAGE}:latest-java
+          docker pull ${DOCKER_GC_IMAGE}:${DOCKER_VERSION}
+          docker pull ${DOCKER_GC_IMAGE}:${DOCKER_VERSION}-java
+          docker pull ${DOCKER_SERVER_ADMIN_IMAGE}:latest
+          docker pull ${DOCKER_SERVER_ADMIN_IMAGE}:latest-java
+          docker pull ${DOCKER_SERVER_ADMIN_IMAGE}:${DOCKER_VERSION}
+          docker pull ${DOCKER_SERVER_ADMIN_IMAGE}:${DOCKER_VERSION}-java
+          docker pull ${DOCKER_CLI_IMAGE}:latest
+          docker pull ${DOCKER_CLI_IMAGE}:latest-java
+          docker pull ${DOCKER_CLI_IMAGE}:${DOCKER_VERSION}
+          docker pull ${DOCKER_CLI_IMAGE}:${DOCKER_VERSION}-java
+          cat <<! >> $GITHUB_STEP_SUMMARY
+          ## Docker images
+          
+          \`\`\`
+          $(docker images)
+          \`\`\`
+          !
+
+      - name: Check if Server Docker Java image works
+        run: |
+          docker run --rm --detach --name nessie ${DOCKER_IMAGE}:latest-java
+          echo "Let Nessie Java Docker image run for one minute (to make sure it starts up fine)..."
+          for i in {1..60}; do
+            STATUS="$(docker container inspect nessie | jq -r '.[0].State.Status')"
+            if [[ ${STATUS} != "running" ]] ; then
+              echo "Nessie Java Docker image stopped on its own ... a bug?" > /dev/stderr
+              docker logs nessie
+              cat <<! >> $GITHUB_STEP_SUMMARY
+              ## Nessie Java Docker image FAILED
+
+              \`\`\`
+              $(docker logs nessie)
+              \`\`\`
+          !
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "## Nessie Java Docker image smoke test: PASSED" >> $GITHUB_STEP_SUMMARY  
+          echo "Nessie Java Docker image smoke test: PASSED"
+          docker stop nessie
+
+      - name: Check if GC Tool Docker Java image works
+        run: |
+          if docker run --rm --name nessie-gc ${DOCKER_GC_IMAGE}:latest-java --help | grep -q "Usage: nessie-gc.jar"; then
+            echo "## GC Tool Java Docker image smoke test: PASSED" >> $GITHUB_STEP_SUMMARY  
+            echo "GC Tool Java Docker image smoke test: PASSED"
+          else
+           echo "GC Tool Java Docker image smoke test: FAILED" > /dev/stderr
+            cat <<! >> $GITHUB_STEP_SUMMARY
+            ## GC Tool Java Docker image FAILED
+
+            \`\`\`
+            $(docker logs nessie-gc)
+            \`\`\`
+          !
+            exit 1
+          fi
+
+      - name: Check if Server Admin Tool Docker Java image works
+        run: |
+          if docker run --rm --name nessie-server-admin ${DOCKER_SERVER_ADMIN_IMAGE}:latest-java --help | grep -q "Usage: nessie-server-admin"; then
+            echo "## Server Admin Tool Java Docker image smoke test: PASSED" >> $GITHUB_STEP_SUMMARY  
+            echo "Server Admin Tool Java Docker image smoke test: PASSED"
+          else
+           echo "Server Admin Tool Java Docker image smoke test: FAILED" > /dev/stderr
+            cat <<! >> $GITHUB_STEP_SUMMARY
+            ## Server Admin Tool Java Docker image FAILED
+
+            \`\`\`
+            $(docker logs nessie-server-admin)
+            \`\`\`
+          !
+            exit 1
+          fi
+
+      - name: Check if CLI Docker Java image works
+        run: |
+          if docker run --rm --name nessie-cli ${DOCKER_CLI_IMAGE}:latest-java --help | grep -q "Usage: nessie-cli.jar"; then
+            echo "## CLI Java Docker image smoke test: PASSED" >> $GITHUB_STEP_SUMMARY  
+            echo "CLI Java Docker image smoke test: PASSED"
+          else
+           echo "CLI Java Docker image smoke test: FAILED" > /dev/stderr
+            cat <<! >> $GITHUB_STEP_SUMMARY
+            ## CLI Java Docker image FAILED
+
+            \`\`\`
+            $(docker logs nessie-cli)
+            \`\`\`
+          !
+            exit 1
+          fi
+
+      - name: Run chart-testing (list-changed)
+        run: |
+          ct list-changed --target-branch ${{ github.event.repository.default_branch }}
+
+      - name: Run 'helm template' validation
+        run: |
+          cd helm/nessie
+          for f in values.yaml ci/*.yaml; do
+            echo "::group::helm template $f"
+            helm template --debug --namespace nessie-ns --api-versions gateway.networking.k8s.io/v1/Gateway --api-versions gateway.networking.k8s.io/v1/HTTPRoute --values $f .
+            echo "::endgroup::"
+          done
+
+      - name: Run Helm unit tests
+        run: |
+          helm plugin install --verify=false https://github.com/helm-unittest/helm-unittest.git || true
+          helm unittest helm/nessie
+
+      - name: Run chart-testing (lint)
+        run: ct lint --debug --charts ./helm/nessie
+
+      - name: Show pods
+        run: kubectl get pods -A
+
+      - name: Install fixtures
+        run: |
+          # Install Gateway API CRDs
+          helm pull oci://docker.io/envoyproxy/gateway-crds-helm \
+            --version v1.7.0 \
+            --untar \
+            --untardir "$RUNNER_TEMP/helm-charts"
+
+          helm template eg "$RUNNER_TEMP/helm-charts/gateway-crds-helm" \
+            --set crds.gatewayAPI.enabled=true \
+            --set crds.gatewayAPI.channel=standard \
+            --set crds.envoyGateway.enabled=false \
+            | kubectl apply --server-side -f -
+          # Install other fixtures
+          kubectl create namespace nessie-ns
+          kubectl apply --namespace nessie-ns $(find helm/nessie/ci/fixtures -name "*.yaml" -exec echo -n "-f {} " \;)
+
+      - name: Run chart-testing (install)
+        run: |
+          echo "Using image: ${DOCKER_IMAGE}"
+          echo "        tag: ${DOCKER_VERSION}"
+
+          ct install \
+            --namespace nessie-ns \
+            --helm-extra-set-args "--set=image.repository=${DOCKER_IMAGE} --set=image.tag=${DOCKER_VERSION}" \
+            --debug --charts ./helm/nessie
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: docker-testing
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+  site:
+    name: CI Website
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+      - name: Prepare Gradle build cache
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+      - name: Setup Python
+        uses: ./.github/actions/dev-tool-python
+        with:
+          python-version: '3.11'
+
+      - name: Generate Static Site
+        run: make build
+        working-directory: ./site
+      - name: Check code block indentation
+        run: python3 check_code_indent.py
+        working-directory: ./site
+      - name: Deploy Static Site to GitHub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'projectnessie/nessie'
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4
+        with:
+          external_repository: projectnessie/projectnessie.github.io
+          publish_branch: main
+          deploy_key: ${{ secrets.NESSIE_SITE_DEPLOY_KEY }}
+          publish_dir: ./site/site
+          cname: projectnessie.org
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: site
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}
+
+  store-cache:
+    # Store the Gradle cache to GH cache as soon as all relevant Nessie/Gradle jobs have finished.
+    name: CI Store Cache
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      # Only include jobs that use Nessie's Gradle cache, especially excluding NesQuEIT, which
+      # is a "very special" citizen and also not run for "main" CI, which does
+      # not add anything to the Gradle cache that's not already produced by other jobs.
+      - code-checks
+      - test
+      - test-quarkus
+      - int-test
+      - int-test-stores
+      - int-test-integrations
+      - int-test-quarkus-server
+      - int-test-quarkus-tool
+      - int-test-quarkus-events
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+      - name: Setup Java, Gradle
+        uses: ./.github/actions/dev-tool-java
+
+      - name: Collect partial Gradle build caches
+        id: gradle-cache
+        uses: ./.github/actions/ci-incr-build-cache-prepare
+        with:
+          cache-read-only: false
+
+      # Note: the "Post ..."-step cleans up stale cache entries and archives the updated build cache.
+
+      - name: Replay telemetry / begin
+        uses: ./.github/actions/replay-telemetry-begin
+
+      - name: Replay telemetry / end
+        if: always()
+        uses: ./.github/actions/replay-telemetry-end
+        with:
+          job: store-cache
+          cache-outputs: ${{ toJSON(steps.gradle-cache.outputs) }}

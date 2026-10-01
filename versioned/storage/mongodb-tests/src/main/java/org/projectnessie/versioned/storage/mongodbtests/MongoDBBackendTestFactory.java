@@ -1,0 +1,140 @@
+/*
+ * Copyright (C) 2024 Dremio
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.projectnessie.versioned.storage.mongodbtests;
+
+import com.mongodb.client.MongoClient;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+import org.projectnessie.nessie.testing.containerspec.ContainerSpecHelper;
+import org.projectnessie.nessie.testing.containerspec.ContainerStarter;
+import org.projectnessie.versioned.storage.common.persist.Backend;
+import org.projectnessie.versioned.storage.mongodb.MongoDBBackend;
+import org.projectnessie.versioned.storage.mongodb.MongoDBBackendConfig;
+import org.projectnessie.versioned.storage.mongodb.MongoDBBackendFactory;
+import org.projectnessie.versioned.storage.testextension.BackendTestFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.testcontainers.containers.output.Slf4jLogConsumer;
+import org.testcontainers.mongodb.MongoDBContainer;
+import org.testcontainers.utility.DockerImageName;
+
+public class MongoDBBackendTestFactory implements BackendTestFactory {
+  private static final Logger LOGGER = LoggerFactory.getLogger(MongoDBBackendTestFactory.class);
+  public static final String MONGO_DB_NAME = "test";
+  public static final int MONGO_PORT = 27017;
+
+  private MongoDBContainer container;
+  private String connectionString;
+
+  @Override
+  public String getName() {
+    return MongoDBBackendFactory.NAME;
+  }
+
+  @Override
+  public void start(Optional<String> containerNetworkId) {
+    if (container != null) {
+      throw new IllegalStateException("Already started");
+    }
+
+    DockerImageName dockerImage =
+        ContainerSpecHelper.builder()
+            .name("mongodb")
+            .containerClass(MongoDBBackendTestFactory.class)
+            .build()
+            .dockerImageName(null)
+            .asCompatibleSubstituteFor("mongo");
+
+    MongoDBContainer started =
+        ContainerStarter.startContainer(
+            () -> {
+              MongoDBContainer c =
+                  new MongoDBContainer(dockerImage).withLogConsumer(new Slf4jLogConsumer(LOGGER));
+              containerNetworkId.ifPresent(c::withNetworkMode);
+              // MongoDB cannot start on Linux kernel 6.19 and newer, see
+              // https://jira.mongodb.org/browse/SERVER-121912.
+              // TODO Remove when SERVER-121912 is fixed and available in a release.
+              c.withEnv("GLIBC_TUNABLES", "glibc.pthread.rseq=1");
+              return c;
+            });
+
+    try {
+      String url = started.getReplicaSetUrl(MONGO_DB_NAME);
+
+      if (containerNetworkId.isPresent()) {
+        String hostPort = started.getHost() + ':' + started.getMappedPort(MONGO_PORT);
+        String networkHostPort =
+            started.getCurrentContainerInfo().getConfig().getHostName() + ':' + MONGO_PORT;
+        url = url.replace(hostPort, networkHostPort);
+      }
+
+      connectionString = url;
+    } catch (RuntimeException e) {
+      // Do not keep a broken container, so that a subsequent start() does not fail with "Already
+      // started".
+      started.close();
+      throw e;
+    }
+    container = started;
+  }
+
+  @Override
+  public Backend createNewBackend() {
+    MongoClient client = buildNewClient();
+
+    MongoDBBackendConfig config =
+        MongoDBBackendConfig.builder().databaseName(MONGO_DB_NAME).client(client).build();
+
+    return new MongoDBBackend(config, true);
+  }
+
+  public MongoClient buildNewClient() {
+    return MongoClientProducer.builder().connectionString(connectionString).build().createClient();
+  }
+
+  public String getDatabaseName() {
+    return MONGO_DB_NAME;
+  }
+
+  public String getConnectionString() {
+    return connectionString;
+  }
+
+  @Override
+  public void start() {
+    start(Optional.empty());
+  }
+
+  @Override
+  public void stop() {
+    try {
+      if (container != null) {
+        container.stop();
+      }
+    } finally {
+      container = null;
+    }
+  }
+
+  @Override
+  public Map<String, String> getQuarkusConfig() {
+    Map<String, String> config = new HashMap<>();
+    config.put("quarkus.mongodb.connection-string", connectionString);
+    config.put("quarkus.mongodb.database", MONGO_DB_NAME);
+    return config;
+  }
+}
